@@ -709,6 +709,7 @@ class CompiledJssEnvCP:
                     )
                 result.append(job_result)
         else:
+            assert cp_result.is_solution(), f'Infeasible solution passed to solver'
             return False, [], INTERVAL_MAX
 
         mdl_compress = CpoModel()
