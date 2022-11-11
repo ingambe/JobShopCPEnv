@@ -480,20 +480,14 @@ class CompiledJssEnvCP:
         self.total_allocated_op: int = 0
         self.machine_to_intervals: collections.defaultdict[int, List[IntervalVar]] = collections.defaultdict(list)
         self.all_tasks: Dict[Tuple[int, int], str] = {}
-        self.mean_not_computed: bool = True
         self.mean: npt.NDArray[np.float32] = np.zeros((4,), dtype=np.float32)
         self.std: npt.NDArray[np.float32] = np.zeros((4,), dtype=np.float32)
         self.machine_to_no_overlap: Dict[int, str] = {}
         self.already_added_interval_job: collections.defaultdict[int, List[str]] = collections.defaultdict(list)
 
     def _normalize_observation(self, observation: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
-        if self.mean_not_computed:
-            all_start_time = [var.start.lb for var in self.model.vars.values()]
-            mean_all_start_time = np.mean(all_start_time)
-            mean_all_start_time = mean_all_start_time * (self.mean_op_count / INTERVALS_COUNT)
-            self.mean = np.array([0.0, mean_all_start_time, self.mean_op_time, 0.0], dtype=float)
-            self.std = np.array([1.0, np.std(all_start_time), self.std_op_time, 1.0], dtype=float)
-            self.mean_not_computed = False
+        self.mean = np.array([0.0, np.mean(observation[:, 1]), self.mean_op_time, 0.0], dtype=float)
+        self.std = np.array([1.0, np.std(observation[:, 1]), self.std_op_time, 1.0], dtype=float)
         observation = (observation - self.mean) / (self.std + 1e-8)
         # print(observation)
         return observation
@@ -848,3 +842,19 @@ class CompiledJssEnvCP:
                font_size: int = 30) -> None:
         pass
 
+
+if __name__ == '__main__':
+    env = CompiledJssEnvCP('instances/tai_j100_m100_1.data')
+    obs = env.reset()
+    done = False
+    info = {}
+    while not done:
+        print(obs['interval_rep'])
+        # sample without replacement from obs['action_mask'] boolean vector
+        action = np.random.choice(np.arange(len(obs['action_mask'])), size=int(sum(obs['action_mask'])),
+                                  p=obs['action_mask'] / obs['action_mask'].sum(), replace=False)
+        obs, reward, done, info = env.step(action)
+    assert "makespan" in info, f'finished without makespan'
+    makespan_agent = int(info["makespan"])
+    solution_agent = json.loads(info["solution"])
+    print(f"makespan agent: {makespan_agent}")
