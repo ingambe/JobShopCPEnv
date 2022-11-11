@@ -6,7 +6,6 @@ import sys
 import json
 import gym
 import numpy as np
-import bisect
 
 from typing import List, Dict, Tuple, ClassVar, Final
 import numpy.typing as npt
@@ -19,8 +18,7 @@ from docplex.cp.solution import CpoSolveResult, CpoIntervalVarSolution
 
 INTERVAL_MIN: Final = -2 ** 30
 INTERVAL_MAX: Final = 2 ** 30
-
-INTERVALS_COUNT: Final = 5
+WINDOW_INTERVAL_SIZE: Final = 5
 
 
 class IntVar:
@@ -188,12 +186,6 @@ class IntervalVar(IntVar):
         self.start.add_constraint(name)
         self.end.add_constraint(name)
 
-    def __lt__(self, other: IntervalVar) -> bool:
-        return self.end.lb < other.end.lb
-
-    def __le__(self, other: IntervalVar) -> bool:
-        return self.end.lb <= other.end.lb
-
 
 class Constraint:
     _name: str
@@ -262,7 +254,7 @@ class NoOverlapConstraint(Constraint):
 
     @property
     def to_delete(self) -> bool:
-        return len(self.intervals) <= 1
+        return False
 
 
 class EndBeforeStartConstraint(Constraint):
@@ -449,10 +441,10 @@ class CompiledJssEnvCP:
         self.observation_space = gym.spaces.Dict(
             {
                 "interval_rep": gym.spaces.Box(
-                    low=-10, high=10, shape=(self.jobs_count, INTERVALS_COUNT, 4), dtype=np.float32
+                    low=-10, high=10, shape=(self.jobs_count, WINDOW_INTERVAL_SIZE, 4), dtype=np.float32
                 ),
                 "index_interval": gym.spaces.Box(
-                    low=-1, high=10, shape=(self.jobs_count, INTERVALS_COUNT), dtype=np.float32
+                    low=-1, high=10, shape=(self.jobs_count, WINDOW_INTERVAL_SIZE), dtype=np.float32
                 ),
                 "action_mask": gym.spaces.Box(
                     0, 1, shape=(self.jobs_count + 1,), dtype=np.float32
@@ -461,10 +453,10 @@ class CompiledJssEnvCP:
                     0, 1, shape=(self.jobs_count + 1, self.jobs_count + 1), dtype=np.float32
                 ),
                 "attention_interval_mask": gym.spaces.Box(
-                    0, 1, shape=(self.jobs_count, INTERVALS_COUNT), dtype=np.float32
+                    0, 1, shape=(self.jobs_count, WINDOW_INTERVAL_SIZE), dtype=np.float32
                 ),
                 "start_end_tokens": gym.spaces.Box(
-                    0, 2, shape=(self.jobs_count, INTERVALS_COUNT), dtype=np.float32
+                    0, 2, shape=(self.jobs_count, WINDOW_INTERVAL_SIZE), dtype=np.float32
                 ),
             }
         )
@@ -480,15 +472,13 @@ class CompiledJssEnvCP:
         self.total_allocated_op: int = 0
         self.machine_to_intervals: collections.defaultdict[int, List[IntervalVar]] = collections.defaultdict(list)
         self.all_tasks: Dict[Tuple[int, int], str] = {}
-        self.mean: npt.NDArray[np.float32] = np.zeros((4,), dtype=np.float32)
-        self.std: npt.NDArray[np.float32] = np.zeros((4,), dtype=np.float32)
         self.machine_to_no_overlap: Dict[int, str] = {}
         self.already_added_interval_job: collections.defaultdict[int, List[str]] = collections.defaultdict(list)
 
     def _normalize_observation(self, observation: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
-        self.mean = np.array([0.0, np.mean(observation[:, 1]), self.mean_op_time, 0.0], dtype=float)
-        self.std = np.array([1.0, np.std(observation[:, 1]), self.std_op_time, 1.0], dtype=float)
-        observation = (observation - self.mean) / (self.std + 1e-8)
+        mean: npt.NDArray[np.float32] = np.array([0.0, np.mean(observation[:, 1]), self.mean_op_time, 0.0], dtype=np.float32)
+        std: npt.NDArray[np.float32] = np.array([1.0, np.std(observation[:, 1]), self.std_op_time, 1.0], dtype=np.float32)
+        observation = (observation - mean) / (std + 1e-8)
         # print(observation)
         return observation
 
@@ -510,7 +500,7 @@ class CompiledJssEnvCP:
         job_resource_mask[self.jobs_count] = self.action_mask
         return job_resource_mask
 
-    def _provide_observation(self, compute_obs: bool = True) -> Dict[str, npt.NDArray[np.float32]]:
+    def _provide_observation(self) -> Dict[str, npt.NDArray[np.float32]]:
         self.model.propagate()
         all_jobs_start_time: List[int] = [
             self.model.vars[self.all_tasks[job_id, len(self.partial_solution[job_id])]].start.lb
@@ -526,66 +516,63 @@ class CompiledJssEnvCP:
         if len(set_min_start) > 1:
             self.no_op_end = set_min_start[1]
 
+        fake_node: npt.NDArray[np.float32] = np.array([0, 0, 0, 0], dtype=np.float32)
+
+        attention_mask: npt.NDArray[np.float32] = np.zeros((self.jobs_count, WINDOW_INTERVAL_SIZE), dtype=np.float32)
+
+        list_node_reps: List[npt.NDArray[np.float32]] = []
+        index_nodes: List[npt.NDArray[np.float32]] = []
+        tokens_nodes: List[npt.NDArray[np.float32]] = []
+        min_op = min([len(self.partial_solution[job_id]) for job_id in range(self.jobs_count)])
+        for job_id in range(self.jobs_count):
+            self.action_mask[job_id] = \
+                (all_jobs_start_time[job_id] == self.current_timestamp) and self.current_timestamp != INTERVAL_MAX
+            this_job_node_rep: List[npt.NDArray[np.float32]] = []
+            this_job_indexes: List[float] = []
+            this_job_tokens: List[float] = []
+            if len(self.partial_solution[job_id]) == 0:
+                this_job_node_rep.append(fake_node)
+                this_job_indexes.append(min_op - 1)
+                this_job_tokens.append(1)
+
+            for task_id in range(len(self.partial_solution[job_id]) - (1 - len(this_job_node_rep)),
+                                 len(self.jobs_data[job_id])):
+                var = self.model.vars[self.all_tasks[job_id, task_id]]
+                legal_op = len(self.partial_solution[job_id]) == task_id and not var.is_fixed
+                this_job_node_rep.append(np.array(
+                    [
+                        var.is_fixed,
+                        var.start.lb,
+                        var.duration,
+                        legal_op
+                    ], dtype=np.float32)
+                )
+                this_job_indexes.append(task_id)
+                this_job_tokens.append(0)
+                if len(this_job_node_rep) == WINDOW_INTERVAL_SIZE:
+                    break
+            k = 0
+            while len(this_job_node_rep) < WINDOW_INTERVAL_SIZE:
+                this_job_node_rep.append(fake_node)
+                this_job_indexes.append(min_op - 1)
+                this_job_tokens.append(2)
+                if k != 0:
+                    attention_mask[job_id, len(this_job_node_rep) - 1] = True
+                k += 1
+            list_node_reps.append(np.stack(this_job_node_rep))
+            index_nodes.append(np.stack(this_job_indexes))
+            tokens_nodes.append(np.stack(this_job_tokens))
+        node_representation = np.stack(list_node_reps)
+        index_representation = np.stack(index_nodes)
+        start_end_tokens = np.stack(tokens_nodes)
+
         self.action_mask[-1] = (self.no_op_end < INTERVAL_MAX)
 
-        if compute_obs:
-            fake_node: npt.NDArray[np.float32] = np.array([0, 0, 0, 0], dtype=np.float32)
-
-            attention_mask: npt.NDArray[np.float32] = np.zeros(
-                (self.jobs_count, INTERVALS_COUNT), dtype=np.float32)
-
-            list_node_reps: List[npt.NDArray[np.float32]] = []
-            index_nodes: List[npt.NDArray[np.float32]] = []
-            tokens_nodes: List[npt.NDArray[np.float32]] = []
-            min_op = min([len(self.partial_solution[job_id]) for job_id in range(self.jobs_count)])
-            for job_id in range(self.jobs_count):
-                self.action_mask[job_id] = \
-                    (all_jobs_start_time[job_id] == self.current_timestamp) and self.current_timestamp != INTERVAL_MAX
-                this_job_node_rep: List[npt.NDArray[np.float32]] = []
-                this_job_indexes: List[float] = []
-                this_job_tokens: List[float] = []
-                if len(self.partial_solution[job_id]) == 0:
-                    this_job_node_rep.append(fake_node)
-                    this_job_indexes.append(min_op - 1)
-                    this_job_tokens.append(1)
-
-                for task_id in range(len(self.partial_solution[job_id]) - (1 - len(this_job_node_rep)),
-                                     len(self.jobs_data[job_id])):
-                    var = self.model.vars[self.all_tasks[job_id, task_id]]
-                    legal_op = len(self.partial_solution[job_id]) == task_id and not var.is_fixed
-                    this_job_node_rep.append(np.array(
-                        [
-                            var.is_fixed,
-                            var.start.lb,
-                            var.duration,
-                            legal_op
-                        ], dtype=np.float32)
-                    )
-                    this_job_indexes.append(task_id)
-                    this_job_tokens.append(0)
-                    if len(this_job_node_rep) == INTERVALS_COUNT:
-                        break
-                k = 0
-                while len(this_job_node_rep) < INTERVALS_COUNT:
-                    this_job_node_rep.append(fake_node)
-                    this_job_indexes.append(min_op - 1)
-                    this_job_tokens.append(2)
-                    if k != 0:
-                        attention_mask[job_id, len(this_job_node_rep) - 1] = True
-                    k += 1
-                list_node_reps.append(np.stack(this_job_node_rep))
-                index_nodes.append(np.stack(this_job_indexes))
-                tokens_nodes.append(np.stack(this_job_tokens))
-            node_representation = np.stack(list_node_reps)
-            index_representation = np.stack(index_nodes)
-            start_end_tokens = np.stack(tokens_nodes)
-            return {"interval_rep": node_representation,
-                    "action_mask": self.action_mask,
-                    "index_interval": index_representation - index_representation.min(initial=0),
-                    "attention_interval_mask": attention_mask,
-                    "start_end_tokens": start_end_tokens}
-        else:
-            return {}
+        return {"interval_rep": node_representation,
+                "action_mask": self.action_mask,
+                "index_interval": index_representation - index_representation.min(initial=0),
+                "attention_interval_mask": attention_mask,
+                "start_end_tokens": start_end_tokens}
 
     # def reset(self) -> Dict[str, np.ndarray]:
     def reset(self) -> Dict[str, npt.NDArray[np.float32]]:
@@ -608,7 +595,7 @@ class CompiledJssEnvCP:
                 machine = task[0]
                 duration = task[1]
                 suffix = f"_{job_id}_{task_id}"
-                if task_id < INTERVALS_COUNT * 2:
+                if task_id < WINDOW_INTERVAL_SIZE * 2:
                     interval_variable = IntervalVar(self.model, duration=duration, name="interval" + suffix)
                     self.model.add(interval_variable)
                     self.machine_to_intervals[machine].append(interval_variable)
@@ -630,7 +617,7 @@ class CompiledJssEnvCP:
                         self.model.vars[self.all_tasks[job_id, task_id]],
                     )
                 )
-        obs = self._provide_observation(compute_obs=True)
+        obs = self._provide_observation()
         obs['job_resource_mask'] = self._get_job_resource_mask()
         obs['interval_rep'] = self._normalize_observation(obs['interval_rep'])
         return obs
@@ -709,7 +696,6 @@ class CompiledJssEnvCP:
                     )
                 result.append(job_result)
         else:
-            assert cp_result.is_solution(), f'Infeasible solution passed to solver'
             return False, [], INTERVAL_MAX
 
         mdl_compress = CpoModel()
@@ -783,7 +769,6 @@ class CompiledJssEnvCP:
                 obs, reward, done, infos = self.one_action(job_id)
                 action_took.append(job_id)
             i += 1
-        obs = self._provide_observation(compute_obs=True)
         obs['job_resource_mask'] = self._get_job_resource_mask()
         obs['interval_rep'] = self._normalize_observation(obs['interval_rep'])
         infos['action_took'] = json.dumps(action_took)
@@ -823,7 +808,7 @@ class CompiledJssEnvCP:
                 interval_variable.add_constraint(no_overlap_cstr)
                 self.already_added_interval_job[action].append(interval_variable.name)
 
-        obs = self._provide_observation(compute_obs=False)
+        obs = self._provide_observation()
         is_done = self.current_timestamp == INTERVAL_MAX
 
         info_dict: Dict[str, str] = {
@@ -842,20 +827,3 @@ class CompiledJssEnvCP:
     def render(self, mode: str = "human", png_filename: str = '', fig_size: Tuple[int, int] = (45, 50),
                font_size: int = 30) -> None:
         pass
-
-
-if __name__ == '__main__':
-    env = CompiledJssEnvCP('instances/tai_j100_m100_1.data')
-    obs = env.reset()
-    done = False
-    info = {}
-    while not done:
-        print(obs['interval_rep'])
-        # sample without replacement from obs['action_mask'] boolean vector
-        action = np.random.choice(np.arange(len(obs['action_mask'])), size=int(sum(obs['action_mask'])),
-                                  p=obs['action_mask'] / obs['action_mask'].sum(), replace=False)
-        obs, reward, done, info = env.step(action)
-    assert "makespan" in info, f'finished without makespan'
-    makespan_agent = int(info["makespan"])
-    solution_agent = json.loads(info["solution"])
-    print(f"makespan agent: {makespan_agent}")
