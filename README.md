@@ -7,3 +7,9 @@ Also, this environment has been developed for an end-to-end approach, there is n
 We recommend the reader to check the paper for more information.
 
 If you need to define a reward function or a different observation, you can do so by forking the environment and modifying the `step` function.
+
+# Installation
+
+```bash
+pip install jss_cp
+```
