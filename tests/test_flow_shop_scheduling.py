@@ -43,9 +43,10 @@ def test_tai_large():
     assert correct_solution, f'agent solution is not correct'
     assert makespan_agent == cp_makespan, f'makespan computation is not correct'
 
-@given(integers(min_value=1, max_value=10))
-def test_tai_random_large(idx):
-    env = CompiledJssEnvCP(f'../src/compiled_jss/instances/tai_j100_m100_{idx}.data')
+# too slow
+@given(integers(min_value=0, max_value=9))
+def test_ta_random(idx):
+    env = CompiledJssEnvCP(f'../src/compiled_jss/instances/ta1{idx}')
     obs = env.reset()
     done = False
     info = {}
@@ -58,6 +59,6 @@ def test_tai_random_large(idx):
     makespan_agent = int(info["makespan"])
     solution_agent = json.loads(info["solution"])
     correct_solution, cp_makespan = checkerSat(solution_agent,
-                                               f'../src/compiled_jss/instances/tai_j100_m100_{idx}.data')
+                                               f'../src/compiled_jss/instances/ta1{idx}')
     assert correct_solution, f'agent solution is not correct'
     assert makespan_agent == cp_makespan, f'makespan computation is not correct'
