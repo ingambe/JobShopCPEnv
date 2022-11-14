@@ -1,7 +1,8 @@
-from src.compiled_jss.CPEnv import CompiledJssEnvCP
-import numpy as np
 import json
 
+import numpy as np
+
+from src.compiled_jss.CPEnv import CompiledJssEnvCP
 from tests.cp_checker import checkerSat
 
 

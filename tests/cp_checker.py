@@ -1,14 +1,15 @@
 import collections
 
-from ortools.sat.python import cp_model
+from docplex.cp.model import *
 
 
 def checkerSat(solution, instance_path):
     # Create the model.
-    model = cp_model.CpModel()
+    mdl = CpoModel()
 
     jobs_data = []
     machines_count = 0
+    jobs_count = 0
 
     instance_file = open(instance_path, 'r')
     line_str = instance_file.readline()
@@ -31,15 +32,6 @@ def checkerSat(solution, instance_path):
 
     all_machines = range(machines_count)
 
-    # Computes horizon dynamically as the sum of all durations.
-    horizon = sum(task[1] for job in jobs_data for task in job)
-
-    # Named tuple to store information about created variables.
-    task_type = collections.namedtuple('task_type', 'start end interval')
-    # Named tuple to manipulate solution information.
-    assigned_task_type = collections.namedtuple('assigned_task_type',
-                                                'start job index duration')
-
     # Creates job intervals and add to the corresponding machine lists.
     all_tasks = {}
     machine_to_intervals = collections.defaultdict(list)
@@ -48,38 +40,26 @@ def checkerSat(solution, instance_path):
         for task_id, task in enumerate(job):
             machine = task[0]
             duration = task[1]
-            suffix = '_%i_%i' % (job_id, task_id)
-            start_var = model.NewIntVar(0, horizon, 'start' + suffix)
-            model.Add(start_var == solution[job_id][task_id])
-            end_var = model.NewIntVar(0, horizon, 'end' + suffix)
-            #start_var = model.NewConstant(solution[job_id][task_id])
-            #end_var = model.NewConstant(solution[job_id][task_id] + duration + 1)
-            interval_var = model.NewIntervalVar(start_var, duration, end_var,
-                                                'interval' + suffix)
-            all_tasks[job_id, task_id] = task_type(
-                start=start_var, end=end_var, interval=interval_var)
-            machine_to_intervals[machine].append(interval_var)
+            suffix = "_%i_%i" % (job_id, task_id)
 
-    # Create and add disjunctive constraints.
+            interval_variable = interval_var(size=duration, name="interval" + suffix)
+            machine_to_intervals[machine].append(interval_variable)
+            all_tasks[job_id, task_id] = interval_variable
+            mdl.add(start_of(interval_variable) == solution[job_id][task_id])
+
+        # Create and add disjunctive constraints.
     for machine in all_machines:
-        model.AddNoOverlap(machine_to_intervals[machine])
+        mdl.add(no_overlap(machine_to_intervals[machine]))
 
-    # Precedences inside a job.
+        # Precedences inside a job.
     for job_id, job in enumerate(jobs_data):
-        for task_id in range(len(job) - 1):
-            model.Add(all_tasks[job_id, task_id +
-                                1].start >= all_tasks[job_id, task_id].end)
+        for task_id in range(1, len(job)):
+            mdl.add(end_before_start(all_tasks[job_id, task_id - 1], all_tasks[job_id, task_id]))
 
-    # Makespan objective.
-    obj_var = model.NewIntVar(0, horizon, 'makespan')
-    model.AddMaxEquality(obj_var, [
-        all_tasks[job_id, len(job) - 1].end
-        for job_id, job in enumerate(jobs_data)
-    ])
-    model.Minimize(obj_var)
+    mdl.add(minimize(max(end_of(task_interval) for task_interval in all_tasks.values())))
 
     # Solve model.
-    solver = cp_model.CpSolver()
-    status = solver.Solve(model)
-    correct_solution = (status == cp_model.OPTIMAL or status == cp_model.FEASIBLE)
-    return correct_solution, solver.ObjectiveValue()
+    res = mdl.solve(Workers=1, LogVerbosity='Quiet')
+    correct_solution = res.is_solution()
+    assert correct_solution, "No solution found"
+    return correct_solution, res.get_objective_value()

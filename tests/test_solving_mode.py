@@ -6,8 +6,8 @@ from src.compiled_jss.CPEnv import CompiledJssEnvCP
 from tests.cp_checker import checkerSat
 
 
-def test_ta01():
-    env = CompiledJssEnvCP('../src/compiled_jss/instances/ta01')
+def test_ta01_solving_mode():
+    env = CompiledJssEnvCP('../src/compiled_jss/instances/ta01', solving_mode=True)
     obs = env.reset()
     done = False
     info = {}
@@ -24,8 +24,8 @@ def test_ta01():
     assert makespan_agent == cp_makespan, f'makespan computation is not correct'
 
 
-def test_ta80():
-    env = CompiledJssEnvCP('../src/compiled_jss/instances/ta80')
+def test_ta80_solving_mode():
+    env = CompiledJssEnvCP('../src/compiled_jss/instances/ta80', solving_mode=True)
     obs = env.reset()
     done = False
     info = {}
@@ -42,8 +42,8 @@ def test_ta80():
     assert makespan_agent == cp_makespan, f'makespan computation is not correct'
 
 
-def test_dmu01():
-    env = CompiledJssEnvCP('../src/compiled_jss/instances/dmu01.txt')
+def test_dmu01_solving_mode():
+    env = CompiledJssEnvCP('../src/compiled_jss/instances/dmu01.txt', solving_mode=True)
     obs = env.reset()
     done = False
     info = {}

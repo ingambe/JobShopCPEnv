@@ -18,7 +18,7 @@ setup(name='jss_approach',
       ],
       python_requires='>=3.8',
       install_requires=['mypy', 'gym', 'numpy', 'matplotlib', 'docplex', 'cloudpickle'],
-      tests_require=['pytest', 'hypothesis', 'ortools'],
+      tests_require=['pytest', 'hypothesis'],
       include_package_data=True,
       ext_modules=mypycify([
           'src/compiled_jss/CPEnv.py',

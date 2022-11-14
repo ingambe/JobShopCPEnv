@@ -1,11 +1,11 @@
-from src.compiled_jss.CPEnv import CompiledJssEnvCP
-import numpy as np
 import json
 
-from tests.cp_checker import checkerSat
-
+import numpy as np
 from hypothesis import given
 from hypothesis.strategies import integers
+
+from src.compiled_jss.CPEnv import CompiledJssEnvCP
+from tests.cp_checker import checkerSat
 
 
 def test_tai_small():
@@ -42,7 +42,6 @@ def test_tai_large():
     correct_solution, cp_makespan = checkerSat(solution_agent, '../src/compiled_jss/instances/tai_j100_m100_1.data')
     assert correct_solution, f'agent solution is not correct'
     assert makespan_agent == cp_makespan, f'makespan computation is not correct'
-
 
 @given(integers(min_value=1, max_value=10))
 def test_tai_random_large(idx):

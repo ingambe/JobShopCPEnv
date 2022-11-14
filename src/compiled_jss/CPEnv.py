@@ -4,6 +4,8 @@ import collections
 
 import sys
 import json
+from copy import deepcopy
+
 import gym
 import numpy as np
 
@@ -186,6 +188,11 @@ class IntervalVar(IntVar):
         self.start.add_constraint(name)
         self.end.add_constraint(name)
 
+    def get_representation_without_lb(self) -> str:
+        rep = f'{self.name} = intervalVar(size={self.duration}); \n'
+        rep += f'startOf({self.name}) <= {self.start.ub};\n'
+        return rep
+
 
 class Constraint:
     _name: str
@@ -217,10 +224,12 @@ class Constraint:
 class NoOverlapConstraint(Constraint):
     count_sequence: ClassVar[int] = 0
     intervals: List[IntervalVar]
+    deleted_intervals: List[IntervalVar]
 
     def __init__(self, intervals: List[IntervalVar]):
         super().__init__(f'_SEQ_{NoOverlapConstraint.count_sequence}')
         self.intervals = intervals
+        self.deleted_intervals = []
         for interval_var in intervals:
             interval_var.add_constraint(self.name)
         NoOverlapConstraint.count_sequence += 1
@@ -243,12 +252,13 @@ class NoOverlapConstraint(Constraint):
                 min_start_lb_non_fixed = min(min_start_lb_non_fixed, interval.start.lb)
         for interval in list_fixed_intervals:
             if interval.end.lb <= min_start_lb_non_fixed:
+                self.deleted_intervals.append(interval)
                 self.intervals.remove(interval)
         self._to_propagate = False
         return reduced
 
     def __repr__(self) -> str:
-        rep = f'{self.name} = sequenceVar([{", ".join([str(interval.name) for interval in self.intervals])}]);\n'
+        rep = f'{self.name} = sequenceVar([{", ".join([str(interval.name) for interval in self.intervals + self.deleted_intervals])}]);\n '
         rep += f'noOverlap({self.name});\n'
         return rep
 
@@ -375,10 +385,20 @@ class Model(object):
     def constraints(self) -> Dict[str, Constraint]:
         return self._constraints
 
+    def representation_compression(self) -> str:
+        rep = ''
+        for var in self._vars.values():
+            rep += var.get_representation_without_lb()
+        for constraint in self._constraints.values():
+            rep += str(constraint)
+        for constraint in self._deleted_constraints:
+            rep += str(constraint)
+        return rep
+
 
 class CompiledJssEnvCP:
 
-    def __init__(self, instance_filename: str):
+    def __init__(self, instance_filename: str, solving_mode: bool = False):
         # super(JssEnvCPLazy, self).__init__()
         context.solver.local.process_start_timeout = 60
         if sys.platform.startswith("linux"):
@@ -403,6 +423,7 @@ class CompiledJssEnvCP:
         all_op_time: List[int] = []
         self.job_op_count: List[int] = []
         self.random_seed: int = 0
+        self.solving_mode: bool = solving_mode
 
         instance_file = open(self.instance_filename, "r")
         line_str: str = instance_file.readline()
@@ -632,6 +653,59 @@ class CompiledJssEnvCP:
     def get_start_interval(self, inter_sol: CpoIntervalVarSolution) -> int:
         return int(inter_sol.get_start())
 
+    def _compress_only(self) -> Tuple[List[List[int]], int]:
+        assigned_jobs: collections.defaultdict[int, List[IntervalVar]] = collections.defaultdict(list)
+        result = deepcopy(self.partial_solution)
+        for job_id in range(len(self.jobs_data)):
+            for task_id in range(len(self.jobs_data[job_id])):
+                machine = self.jobs_data[job_id][task_id][0]
+                assigned_jobs[machine].append(self.model.vars[self.all_tasks[job_id, task_id]])
+        mdl_compress = CpoModel()
+        mdl_compress.import_model_string(self.model.representation_compression())
+
+        task_compress: List[CpoIntervalVar] = [task for task in mdl_compress.get_all_variables() if
+                                               isinstance(task, CpoIntervalVar)]
+
+        all_tasks_compress: Dict[Tuple[int, int], CpoIntervalVar] = {}
+
+        for task in task_compress:
+            all_tasks_compress[int(task.get_name().split("_")[1]), int(task.get_name().split("_")[2])] = task
+
+        for machine in range(self.machines_count):
+            # Sort by starting time.
+            assigned_jobs[machine] = sorted(assigned_jobs[machine], key=lambda x: x.start.lb)
+            for task_id in range(1, len(assigned_jobs[machine])):
+                before: IntervalVar = assigned_jobs[machine][task_id - 1]
+                before_index: List[str] = before.name.split("_")
+                before_index_int: Tuple[int, int] = int(before_index[1]), int(before_index[2])
+                after: IntervalVar = assigned_jobs[machine][task_id]
+                after_index: List[str] = after.name.split("_")
+                after_index_int: Tuple[int, int] = int(after_index[1]), int(after_index[2])
+                mdl_compress.add(
+                    end_before_start(
+                        all_tasks_compress[before_index_int], all_tasks_compress[after_index_int]
+                    )
+                )
+
+        compress_obj: CpoFunctionCall = sum(
+            start_of(task) for task in all_tasks_compress.values()
+        )
+        compress_obj.set_name("compress_obj")
+        mdl_compress.add(minimize(compress_obj))
+        cp_result = mdl_compress.solve(Workers=1, LogVerbosity="Quiet")
+
+        objective: int = 0
+        if cp_result and cp_result.is_solution():
+            for job_id in range(self.jobs_count):
+                for task_id in range(0, len(self.jobs_data[job_id])):
+                    result[job_id][task_id] = int(cp_result.get_var_solution(all_tasks_compress[job_id, task_id]).start)
+                    objective = max(objective, result[job_id][task_id] + self.jobs_data[job_id][task_id][1])
+        else:
+            print('BUG ON COMPRESSION ONLY')
+            return [], INTERVAL_MAX
+
+        return result, objective
+
     def solve_using_cp(self, starting_point_solution: List[List[int]] = list(), time_limit: int = 10,
                        workers: int = 1) -> Tuple[bool, List[List[int]], int]:
         for job_id in range(self.jobs_count):
@@ -721,14 +795,14 @@ class CompiledJssEnvCP:
             )
             for task_id in range(1, len(assigned_jobs[machine])):
                 before: CpoIntervalVarSolution = assigned_jobs[machine][task_id - 1]
-                before_index = before.get_name().split("_")
-                before_index = int(before_index[1]), int(before_index[2])
+                before_index: List[str] = before.get_name().split("_")
+                before_index_int: Tuple[int, int] = int(before_index[1]), int(before_index[2])
                 after: CpoIntervalVarSolution = assigned_jobs[machine][task_id]
-                after_index = after.get_name().split("_")
-                after_index = int(after_index[1]), int(after_index[2])
+                after_index: List[str] = after.get_name().split("_")
+                after_index_int: Tuple[int, int] = int(after_index[1]), int(after_index[2])
                 mdl_compress.add(
                     end_before_start(
-                        all_tasks_compress[before_index], all_tasks_compress[after_index]
+                        all_tasks_compress[before_index_int], all_tasks_compress[after_index_int]
                     )
                 )
 
@@ -824,11 +898,16 @@ class CompiledJssEnvCP:
         }
 
         if is_done:
-            makespan = 0
-            for job_id in range(self.jobs_count):
-                makespan = max(makespan, self.partial_solution[job_id][-1] + self.jobs_data[job_id][-1][1])
-            info_dict["makespan"] = str(makespan)
-            info_dict['solution'] = json.dumps(self.partial_solution)
+            if not self.solving_mode:
+                makespan = 0
+                for job_id in range(self.jobs_count):
+                    makespan = max(makespan, self.partial_solution[job_id][-1] + self.jobs_data[job_id][-1][1])
+                info_dict["makespan"] = str(makespan)
+                info_dict['solution'] = json.dumps(self.partial_solution)
+            else:
+                self.partial_solution, makespan = self._compress_only()
+                info_dict["makespan"] = str(makespan)
+                info_dict['solution'] = json.dumps(self.partial_solution)
         return {}, 0.0, is_done, info_dict
 
     def render(self, mode: str = "human", png_filename: str = '', fig_size: Tuple[int, int] = (45, 50),
