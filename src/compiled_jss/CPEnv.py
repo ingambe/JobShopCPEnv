@@ -437,7 +437,7 @@ class CompiledJssEnvCP:
 
         self.mean_op_count: float = np.mean(self.job_op_count).item()
 
-        self.action_space = gym.spaces.Discrete(self.jobs_count + 1)
+        self.action_space = gym.spaces.Discrete(self.jobs_count)
         self.observation_space = gym.spaces.Dict(
             {
                 "interval_rep": gym.spaces.Box(
@@ -447,10 +447,10 @@ class CompiledJssEnvCP:
                     low=-1, high=10, shape=(self.jobs_count, WINDOW_INTERVAL_SIZE), dtype=np.float32
                 ),
                 "action_mask": gym.spaces.Box(
-                    0, 1, shape=(self.jobs_count + 1,), dtype=np.float32
+                    0, 1, shape=(self.jobs_count,), dtype=np.float32
                 ),
                 "job_resource_mask": gym.spaces.Box(
-                    0, 1, shape=(self.jobs_count + 1, self.jobs_count + 1), dtype=np.float32
+                    0, 1, shape=(self.jobs_count, self.jobs_count), dtype=np.float32
                 ),
                 "attention_interval_mask": gym.spaces.Box(
                     0, 1, shape=(self.jobs_count, WINDOW_INTERVAL_SIZE), dtype=np.float32
@@ -462,7 +462,7 @@ class CompiledJssEnvCP:
         )
         # self.mean_machine_time: float = np.mean(list(self.machine_total_time.values())).item()
 
-        self.action_mask: npt.NDArray[np.float32] = np.zeros((self.jobs_count + 1), dtype=np.float32)
+        self.action_mask: npt.NDArray[np.float32] = np.zeros((self.jobs_count), dtype=np.float32)
 
         # for solving
         self.partial_solution: List[List[int]] = []
@@ -484,7 +484,7 @@ class CompiledJssEnvCP:
         return observation
 
     def _get_job_resource_mask(self) -> npt.NDArray[np.float32]:
-        job_resource_mask: npt.NDArray[np.float32] = np.eye(self.jobs_count + 1, self.jobs_count + 1, dtype=np.float32)
+        job_resource_mask: npt.NDArray[np.float32] = np.eye(self.jobs_count, self.jobs_count, dtype=np.float32)
         machine_job = collections.defaultdict(list)
         for job_id in range(self.jobs_count):
             if self.action_mask[job_id]:
@@ -492,13 +492,12 @@ class CompiledJssEnvCP:
                 machine_job[machine_needed].append(job_id)
         for machine in machine_job:
             jobs_of_resource = machine_job[machine]
-            mask_to_make = [False for _ in range(self.jobs_count + 1)]
+            mask_to_make = [False for _ in range(self.jobs_count)]
             mask_to_make[-1] = self.action_mask[-1]
             for job_id in jobs_of_resource:
                 mask_to_make[job_id] = True
             for job_id in jobs_of_resource:
                 job_resource_mask[job_id, :] = mask_to_make
-        job_resource_mask[self.jobs_count] = self.action_mask
         return job_resource_mask
 
     def _update_internal_state(self) -> None:
@@ -517,7 +516,6 @@ class CompiledJssEnvCP:
         if len(set_min_start) > 1:
             self.no_op_end = set_min_start[1]
 
-        self.action_mask[-1] = (self.no_op_end < INTERVAL_MAX)
         for job_id in range(self.jobs_count):
             self.action_mask[job_id] = \
                 (self.all_jobs_start_time[job_id] == self.current_timestamp) and self.current_timestamp != INTERVAL_MAX
@@ -579,7 +577,7 @@ class CompiledJssEnvCP:
 
     # def reset(self) -> Dict[str, np.ndarray]:
     def reset(self) -> Dict[str, npt.NDArray[np.float32]]:
-        self.action_mask = np.zeros((self.jobs_count + 1), dtype=np.float32)
+        self.action_mask = np.zeros((self.jobs_count), dtype=np.float32)
         self.current_timestamp = 0
         self.total_allocated_op = 0
         self.partial_solution = [[] for _ in range(self.jobs_count)]
@@ -781,41 +779,32 @@ class CompiledJssEnvCP:
         return obs, 0.0, done, infos
 
     def one_action(self, action: int) -> Tuple[Dict[str, npt.NDArray[np.float32]], float, bool, Dict[str, str]]:
-        if action >= self.jobs_count:
-            for job_id in range(self.jobs_count):
-                for task_id in range(len(self.partial_solution[job_id]),
-                                     min(len(self.partial_solution[job_id]) + 1, len(self.jobs_data[job_id]))):
-                    self.model.add_constraint(
-                        ArithmeticConstraint(self.model.vars[self.all_tasks[job_id, task_id]].start, '>=',
-                                             self.no_op_end)
-                    )
-        else:
-            self.model.add_constraint(
-                ArithmeticConstraint(self.model.vars[self.all_tasks[action, len(self.partial_solution[action])]].start,
-                                     '==', self.current_timestamp)
-            )
-            self.partial_solution[action].append(self.current_timestamp)
-            self.total_allocated_op += 1
-            # lazy interval
-            if len(self.already_added_interval_job[action]) < len(self.jobs_data[action]):
-                machine, time_op = self.jobs_data[action][len(self.already_added_interval_job[action])]
-                suffix = f"_{action}_{len(self.already_added_interval_job[action])}"
-                interval_variable = IntervalVar(self.model, duration=time_op, name="interval" + suffix)
-                self.model.add(interval_variable)
-                self.machine_to_intervals[machine].append(interval_variable)
-                self.all_tasks[action, len(self.already_added_interval_job[action])] = interval_variable.name
-                # add end before start
-                before_interval_name = self.all_tasks[action, len(self.already_added_interval_job[action]) - 1]
-                before_interval = self.model.vars[before_interval_name]
-                end_before_cstr = EndBeforeStartConstraint(before_interval, interval_variable)
-                self.model.add_constraint(end_before_cstr)
-                # add constraint no overlap
-                no_overlap_cstr = self.machine_to_no_overlap[machine]
-                interval_variable.add_constraint(no_overlap_cstr)
-                self.already_added_interval_job[action].append(interval_variable.name)
+        self.model.add_constraint(
+            ArithmeticConstraint(self.model.vars[self.all_tasks[action, len(self.partial_solution[action])]].start,
+                                 '==', self.model.vars[self.all_tasks[action, len(self.partial_solution[action])]].start.lb)
+        )
+        self.partial_solution[action].append(self.current_timestamp)
+        self.total_allocated_op += 1
+        # lazy interval
+        if len(self.already_added_interval_job[action]) < len(self.jobs_data[action]):
+            machine, time_op = self.jobs_data[action][len(self.already_added_interval_job[action])]
+            suffix = f"_{action}_{len(self.already_added_interval_job[action])}"
+            interval_variable = IntervalVar(self.model, duration=time_op, name="interval" + suffix)
+            self.model.add(interval_variable)
+            self.machine_to_intervals[machine].append(interval_variable)
+            self.all_tasks[action, len(self.already_added_interval_job[action])] = interval_variable.name
+            # add end before start
+            before_interval_name = self.all_tasks[action, len(self.already_added_interval_job[action]) - 1]
+            before_interval = self.model.vars[before_interval_name]
+            end_before_cstr = EndBeforeStartConstraint(before_interval, interval_variable)
+            self.model.add_constraint(end_before_cstr)
+            # add constraint no overlap
+            no_overlap_cstr = self.machine_to_no_overlap[machine]
+            interval_variable.add_constraint(no_overlap_cstr)
+            self.already_added_interval_job[action].append(interval_variable.name)
 
         self._update_internal_state()
-        #obs = self._provide_observation()
+        # obs = self._provide_observation()
         is_done = self.current_timestamp == INTERVAL_MAX
 
         info_dict: Dict[str, str] = {
