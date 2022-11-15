@@ -1,7 +1,8 @@
 import json
+from datetime import timedelta
 
 import numpy as np
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis.strategies import integers
 
 from src.compiled_jss.CPEnv import CompiledJssEnvCP
@@ -43,7 +44,7 @@ def test_tai_large():
     assert correct_solution, f'agent solution is not correct'
     assert makespan_agent == cp_makespan, f'makespan computation is not correct'
 
-# too slow
+@settings(deadline=None)
 @given(integers(min_value=0, max_value=9))
 def test_ta_random(idx):
     env = CompiledJssEnvCP(f'../src/compiled_jss/instances/ta1{idx}')
