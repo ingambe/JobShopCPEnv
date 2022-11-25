@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "job_shop_cp_env"
+version = "1.0.0"
+authors = [
+  { name="Pierre Tassel", email="pierre.tassel@outlook.fr" },
+]
+description = "An optimized RL approach to learn and simulate the Job-Shop Scheduling problem using Constraint Programming"
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/ingambe/JobShopCPEnv"
+"Bug Tracker" = "https://github.com/ingambe/JobShopCPEnv/issues"
