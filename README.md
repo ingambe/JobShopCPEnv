@@ -11,5 +11,5 @@ If you need to define a reward function or a different observation, you can do s
 # Installation
 
 ```bash
-pip install jss_cp
+pip install job-shop-cp-env
 ```
